@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
 from git import Repo, GitCommandError
+from pathspec import PathSpec
+from pathspec.patterns import GitWildMatchPattern
 
 from .utils import (
     is_supported_file,
-    should_ignore_path,
     get_repo_name_from_url,
     normalize_path,
     ensure_dir,
@@ -193,7 +194,19 @@ class RepositoryLoader:
         files = []
         total_size = 0
         max_file_size_bytes = self.max_file_size_mb * 1024 * 1024
-        
+        ignore_spec = PathSpec.from_lines(GitWildMatchPattern, effective_ignore)
+
+        def is_ignored_repo_relative(rel_path: str, *, is_dir: bool = False) -> bool:
+            """Match ignore patterns against normalized repo-relative paths."""
+            normalized = normalize_path(rel_path)
+            if ignore_spec.match_file(normalized):
+                return True
+            # Directory-style patterns (e.g. "output/" or ".venv/") are most
+            # reliable with a trailing slash candidate.
+            if is_dir and ignore_spec.match_file(f"{normalized}/"):
+                return True
+            return False
+
         for root, dirs, filenames in os.walk(self.repo_path):
             # Filter ignored directories using paths relative to repo root.
             # Matching absolute paths can miss gitwildmatch patterns such as
@@ -204,10 +217,7 @@ class RepositoryLoader:
                 rel_dir_path = normalize_path(
                     os.path.relpath(abs_dir_path, self.repo_path)
                 )
-                rel_dir_with_trailing = f"{rel_dir_path}/"
-                if should_ignore_path(rel_dir_path, self.ignore_patterns) or should_ignore_path(
-                    rel_dir_with_trailing, self.ignore_patterns
-                ):
+                if is_ignored_repo_relative(rel_dir_path, is_dir=True):
                     continue
                 filtered_dirs.append(d)
             dirs[:] = filtered_dirs
@@ -215,9 +225,9 @@ class RepositoryLoader:
             for filename in filenames:
                 file_path = os.path.join(root, filename)
                 relative_path = normalize_path(os.path.relpath(file_path, self.repo_path))
-                
+
                 # Check if should ignore
-                if should_ignore_path(relative_path, self.ignore_patterns):
+                if is_ignored_repo_relative(relative_path):
                     continue
                 
                 # Check if supported extension
