@@ -5,6 +5,7 @@ Complete API with all features from web_app.py
 
 import os
 import platform
+import datetime as dt
 
 if platform.system() == 'Darwin':
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -82,6 +83,13 @@ class StatusResponse(BaseModel):
     loaded_repositories: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class SecurityEventIngestRequest(BaseModel):
+    """Compatibility payload for OmniLore security-sentinel ingest calls."""
+
+    event: Dict[str, Any] = Field(default_factory=dict)
+    tenant_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
 # Initialize FastAPI app
 
 @asynccontextmanager
@@ -112,6 +120,11 @@ app.add_middleware(
 
 # Global FastCode instance
 fastcode_instance: Optional[FastCode] = None
+security_event_buffer: list[Dict[str, Any]] = []
+SECURITY_EVENT_BUFFER_LIMIT = max(
+    10,
+    int(os.getenv("FASTCODE_SECURITY_EVENT_BUFFER_LIMIT", "500")),
+)
 
 # Setup logging
 log_dir = Path("./logs")
@@ -165,6 +178,53 @@ async def health_check():
         "repo_loaded": fastcode_instance.repo_loaded,
         "repo_indexed": fastcode_instance.repo_indexed,
         "multi_repo_mode": fastcode_instance.multi_repo_mode,
+        "security_ingest_enabled": True,
+        "security_event_buffer_size": len(security_event_buffer),
+    }
+
+
+@app.post("/ingest")
+async def ingest_security_event(request: SecurityEventIngestRequest):
+    """
+    Security Sentinel compatibility endpoint.
+
+    OmniLore white-label tooling posts security events here when configured with
+    OMNILORE_SECURITY_SENTINEL_URL=http://127.0.0.1:8001.
+    """
+    fastcode = _ensure_fastcode_initialized()
+
+    event = request.event or {}
+    tenant_context = request.tenant_context or {}
+    record = {
+        "received_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "event": _safe_jsonable(event),
+        "tenant_context": _safe_jsonable(tenant_context),
+    }
+    security_event_buffer.append(record)
+    if len(security_event_buffer) > SECURITY_EVENT_BUFFER_LIMIT:
+        security_event_buffer.pop(0)
+
+    event_type = (
+        event.get("type")
+        or event.get("event")
+        or event.get("name")
+        or "unknown"
+    )
+    tenant_id = tenant_context.get("tenant_id", "unknown")
+    logger.warning(
+        "Security ingest accepted (compat): event_type=%s tenant_id=%s",
+        event_type,
+        tenant_id,
+    )
+
+    return {
+        "status": "received",
+        "mode": "fastcode_compat",
+        "event_type": event_type,
+        "tenant_id": tenant_id,
+        "repo_loaded": fastcode.repo_loaded,
+        "repo_indexed": fastcode.repo_indexed,
+        "security_event_buffer_size": len(security_event_buffer),
     }
 
 
